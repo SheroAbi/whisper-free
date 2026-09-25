@@ -4,7 +4,7 @@ import type { Settings } from './types'
  * Engine protocol version (must match PROTOCOL_VERSION in engine.py). Bumping
  * it invalidates resident daemons from older builds: the app replaces them.
  */
-export const ENGINE_PROTOCOL_VERSION = 3
+export const ENGINE_PROTOCOL_VERSION = 4
 
 /** How long the resident engine daemon stays alive after the app quits. */
 export const DAEMON_IDLE_TIMEOUT_S = 1800

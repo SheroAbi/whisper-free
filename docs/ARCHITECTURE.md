@@ -92,8 +92,8 @@ Python-Daemon (detached, überlebt die App), PowerShell-Win32-Host.
 
 | Datei | Aufgabe |
 |---|---|
-| `engine.py` | **Daemon + State-Machine** (siehe §5): Audio-Ingest unter Lock, Silero-gated Streaming-Scheduler, adaptive Partial-Intervalle, Heat-Guard (≥2,5 s Partial → Partials aus), Timestamp-Stitching über das 12,6-s-Fenster, **spekulative Finals** (Dekodierung startet bei ~50 % der Stille-Fenster, Final ist instant), `--serve`-Mode (Loopback-Socket, Token-Handshake, State-Replay, Idle-Exit 30 min), `had_fatal`-Flag. `PROTOCOL_VERSION` (3) muss mit der App matchen. |
-| `asr.py` | Parakeet-Wrapper: CUDA→DML→CPU-Provider-Aushandlung (env `PARAKEET_PROVIDERS` gewinnt), `onnxruntime.preload_dlls()` + torch-DLL-Fallback, lädt immer aus dem eigenen Modell-Ordner (`model_store.py`, kein Netzwerk beim Start), Fallback-Kette fp32/int8 × v3/v2, Multi-Shape-Warmup (`warmup(shapes)`), Backend-Erkennung (scannt alle InferenceSessions), `transcribe_tokens()` via rohe `recognize_batch`-API **ohne** Logprob-Berechnung (schnellere Partials). |
+| `engine.py` | **Daemon + State-Machine** (siehe §5): Audio-Ingest unter Lock, Silero-gated Streaming-Scheduler, adaptive Partial-Intervalle, Heat-Guard (≥2,5 s Partial → Partials aus), **Segmentierung an Sprechpausen** (`segmenter.py`: 8–24-s-Segmente, fertige Segmente werden schon während der Aufnahme dekodiert), **spekulative Finals** (Dekodierung startet bei ~50 % der Stille-Fenster, Final ist instant), `--serve`-Mode (Loopback-Socket, Token-Handshake, State-Replay, Idle-Exit 30 min), `had_fatal`-Flag. `PROTOCOL_VERSION` (4) muss mit der App matchen. |
+| `asr.py` | Parakeet-Wrapper: CUDA→DML→CPU-Provider-Aushandlung (env `PARAKEET_PROVIDERS` gewinnt), `onnxruntime.preload_dlls()` + torch-DLL-Fallback, lädt immer aus dem eigenen Modell-Ordner (`model_store.py`, kein Netzwerk beim Start), Fallback-Kette fp32/int8 × v3/v2, Multi-Shape-Warmup (`warmup(shapes)`), Backend-Erkennung (scannt alle InferenceSessions). |
 | `vad_silero.py` | Silero VAD v5, stateful: 512-Sample-Frames @16 kHz + 64-Sample-Kontext + (2,1,128)-State, Hysterese (start 0,5 / end −0,15), <1 ms/Frame auf CPU. Mappt den VAD-Sensitivity-Slider auf Start-Wahrscheinlichkeit. Exponiert `ms_since_voice()` fürs Partial-Gating. |
 | `vad.py` | Energy-VAD (RMS + adaptiver Noise-Floor) als Fallback, falls Silero nicht ladbar — gleiches Interface. |
 | `protocol.py` | Framing `[u32 BE][type][payload]`; `set_output()` für den Serve-Mode (Events → Client-Socket), `NullWriter` ohne Client, `send()` mit Single-Write + Crash-sicherem try. |
@@ -163,33 +163,36 @@ IPC → Main → Daemon. Context `latencyHint: 'interactive'`,
 **keine** Inferenz — null CPU/GPU-Last, null Lüfter. Partials nur, wenn in den
 letzten 1500 ms Sprache war (+ ein Trailing-Partial 350 ms nach Sprachende).
 
-**Streaming-Partials:** Alle `partialIntervalMs` (Default 250 ms) wird der
-Puffer neu dekodiert. Das Intervall adaptiert: `max(Setting, 2×letzte
-Inferenz)` — eine langsame Maschine throttled sich selbst statt zu
-überhitzen. Ein einzelnes Partial >2,5 s deaktiviert Live-Partials für die
-Session (Finals bleiben unaffected).
+**Segmentierung (warum):** Ein Sprachmodell nie mit der ganzen Aufnahme
+füttern. Parakeet driftet bei langen Eingaben (falsche Wörter, plötzlich
+Englisch) und bricht bei ~7 min mit einem ONNX-Fehler ab. `segmenter.py`
+schneidet deshalb an **echten Sprechpausen** (Mitte der längsten Pause, per
+Silero-VAD-Spur pro Frame) in Segmente von 8–24 s; nur wer 24 s ohne Pause
+redet, wird an der leisesten Stelle geschnitten. Kein Wort wird zerteilt.
 
-**Fenster-Stitching:** Ab 12,6 s Utterance-Länge dekodiert das Partial nur das
-Ende (12 s + 0,6 s Vorlauf). Die Wort-Zeiten aus dem TDT-Decoder frieren den
-Text vor dem Fenster ein (`_last_tokens`); Tokens in der 0,15-s-Nahtzone
-kommen aus dem Fenster-Re-Dekod mit vollem Kontext. Ergebnis: der Live-Text
-wächst monoton statt zu springen, ohne Duplikate.
+**Commits während der Aufnahme:** Ist das offene Segment ≥14 s und kommt eine
+Pause ≥450 ms, wird es abgeschlossen und im Hintergrund in voller Qualität
+dekodiert (`_commit_queue` → `_committed`). Der Final dekodiert danach nur
+noch das letzte offene Segment → Stopp→Text bleibt ~0,3 s, egal wie lang die
+Aufnahme war. Reine Stille-Segmente werden übersprungen (Modelle erfinden
+sonst Füllwörter wie „Mm-hmm").
 
-**Spekulative Finals:** Nach ~50 % des Stille-Fensters (min. 300 ms) startet
-eine **volle Dekodierung der Utterance** im Hintergrund. Bestätigt der VAD
-dann den Endpunkt, ist das Final-Ergebnis meist schon fertig → der Final-Event
-feuert instant (Feld `speculative: true`). Spricht man doch weiter, wird die
-Spekulation verworfen (`_spec = None`) und normal weitergestreamt. Der Final
-hat **immer** Vorrang vor wartenden Partials/Specs (eine Dekodierung max.).
+**Streaming-Partials:** Alle `partialIntervalMs` (Default 250 ms):
+Live-Text = committete Segmente + Dekodierung des offenen Segments (≤24 s).
+Das Intervall adaptiert: `max(Setting, 2×letzte Inferenz)`. Ein einzelnes
+Partial >2,5 s deaktiviert Live-Partials für die Session (Finals unberührt).
 
-**Stopp→Einfügen (gemessen):** ~200 ms Dekodierung (spekulativ oft 0 ms
-zusätzlich) + ~80 ms Paste. Final-Text ist immer eine vollständige
-Neu-Dekodierung der ganzen Äußerung — die Vorschau ist Optimierung, das
-Ergebnis nicht.
+**Spekulative Finals (nur Auto-Stop):** Nach ~50 % des Stille-Fensters wird
+das offene Segment im Hintergrund dekodiert; bestätigt der VAD den Endpunkt,
+feuert der Final sofort (`speculative: true`). Neue Sprache verwirft die
+Spekulation. Der Final hat immer Vorrang vor Partials/Specs.
+
+**Gemessen (7-min-Aufnahme, RTX 2080 Ti):** 99,0 % Wort-Übereinstimmung mit
+dem Referenztext, Stopp→Final 0,3 s. Vorher: Absturz bei ~7 min.
 
 **Qwen-Modus:** Autoregressiv → Partials deutlich träger (dokumentiert im
 Model-Dropdown); Finals hochwertig bei schwerem Audio. Gleiche Pipeline, nur
-`transcribe()` statt `transcribe_tokens()`.
+dieselbe Segmentierung (hält Qwen auch unter seinem 256-Token-Limit).
 
 ---
 

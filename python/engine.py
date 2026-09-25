@@ -4,15 +4,17 @@ Reads framed audio/control on stdin, runs Parakeet (onnx-asr) on a dedicated
 inference thread so stdin handling never blocks, and emits newline-JSON events
 on stdout.
 
-Real-time strategy (v2):
+Real-time strategy (v3):
   * Silero VAD (streaming, <1 ms / 32 ms frame on CPU) gates everything. During
     silence NO inference runs at all - the machine stays cool and quiet.
-  * While speech is active, partials re-decode the utterance on a fixed cadence
-    (default 250 ms); the interval self-adapts upward if inference is slower,
-    so a slow machine throttles instead of melting (backpressure + heat guard).
-  * The final pass always re-decodes the whole utterance cleanly on stop /
-    silence endpoint. Pending partials never delay the final (the worker skips
-    them), so stop->insert stays fast.
+  * Long dictations are never decoded in one pass (the model drifts into wrong
+    words and, around 7 min, fails outright). The recording is cut at natural
+    speech pauses into 8-24 s segments (segmenter.py). Each finished segment
+    is decoded at full quality in the background while the user keeps talking
+    ("committed"), so the final only has to decode the last open segment.
+  * Live partials = committed text + a decode of the open segment, on a fixed
+    cadence (default 250 ms) that self-adapts if inference is slower (heat
+    guard). Pending partials never delay the final.
 
 Run:  python engine.py --model <id> --quantization fp32 --language auto
 """
@@ -32,20 +34,16 @@ import numpy as np
 
 import protocol
 from asr import ParakeetASR
+from segmenter import (PAUSE_COMMIT, SEG_MAX, SEG_MIN, SEG_TARGET, AudioBuffer,
+                       SpeechTrack, join_texts, plan_segments)
 from vad import EnergyVAD
 
 SAMPLE_RATE = 16000
 
 # Bumped whenever the engine protocol/CLI changes; a mismatching daemon is
 # replaced by the app instead of spoken to.
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 PARTIAL_MIN_SAMPLES = int(0.32 * SAMPLE_RATE)
-# Cap on the partial decode window. The extra guard is left-context audio: a
-# token cut by the window edge decodes garbled, so the window starts 0.6 s
-# earlier than the text seam and that seam zone re-decodes cleanly each time.
-PARTIAL_MAX_SECONDS = 12.0
-PARTIAL_GUARD_S = 0.6
-PARTIAL_SEAM_S = 0.15
 VOICE_RECENT_MS = 1500.0  # keep streaming this long after speech stops
 TAIL_PARTIAL_DELAY_MS = 350.0  # one trailing partial to catch the last words
 HEAT_GUARD_MS = 2500.0  # a single partial slower than this disables partials
@@ -103,8 +101,16 @@ class Engine:
         self.lock = threading.RLock()
         self.cv = threading.Condition(self.lock)
 
-        self.buffer: list[np.ndarray] = []
-        self.buffered_samples = 0
+        # The whole utterance (never trimmed while recording) + per-frame VAD.
+        self.audio = AudioBuffer()
+        self.track = SpeechTrack()
+        # Segments decoded in the background while recording: texts in order,
+        # the sample index they cover up to, the index up to which segments are
+        # already queued, and the queue of (utterance_id, start, end) to decode.
+        self._committed: list[str] = []
+        self._committed_end = 0
+        self._commit_upto = 0
+        self._commit_queue: list[tuple[int, int, int]] = []
 
         self.recording = False
         self.ready = False
@@ -115,8 +121,8 @@ class Engine:
         self.pending_partial = False
         self.pending_final = False
         self.final_auto = False
-        # Speculative final: a full-utterance decode kicked off mid-silence.
-        # {"text": str, "ms": float} or None; invalid the moment speech resumes.
+        # Speculative final: decode of the open segment kicked off mid-silence.
+        # {"uid", "start", "text", "ms"} or None; invalid once speech resumes.
         self.pending_spec = False
         self._spec = None
 
@@ -127,9 +133,6 @@ class Engine:
         self._last_voice_ms = float("-inf")  # wall time of last detected speech
         self._tail_partial_at: float | None = None
         self._partials_disabled = False
-        # Token timeline of the previous partial (piece, abs_start, abs_end) for
-        # stitching the live text across the sliding partial window.
-        self._last_tokens: list[tuple[str, float, float]] = []
 
         # Default ON: after ~1 s of silence the utterance finalizes and inserts
         # by itself - speak, pause, text appears. Set from settings.autoStop.
@@ -197,10 +200,11 @@ class Engine:
         endpoint = False
         voiced = False
         with self.lock:
-            self.buffer.append(samples)
-            self.buffered_samples += samples.size
+            self.audio.append(samples)
             vad_res = self.vad.update(samples)
             voiced = bool(vad_res["voiced"])
+            self.track.add(len(self.audio), voiced, float(vad_res.get("rms", 0.0)))
+            self._maybe_commit_segment()
             if voiced:
                 # Speech resumed: a speculative decode of the buffer is stale.
                 self._spec = None
@@ -230,6 +234,31 @@ class Engine:
         if not voiced:
             self._maybe_speculate(now)
         self._maybe_schedule_partial(now, voiced)
+
+    def _maybe_commit_segment(self) -> None:
+        """Close the open segment at a pause and queue it for decoding.
+
+        Called under the lock for every audio frame. A segment closes at the
+        first sentence-length pause once it is SEG_TARGET long, or - if the
+        speaker never pauses - at the best spot before it reaches SEG_MAX.
+        """
+        total = len(self.audio)
+        open_len = total - self._commit_upto
+        if open_len < SEG_TARGET:
+            return
+        cut = None
+        pause_start = self.track.trailing_pause_start()
+        if pause_start is not None and total - pause_start >= PAUSE_COMMIT \
+                and pause_start - self._commit_upto >= SEG_MIN:
+            cut = (pause_start + total) // 2
+        elif open_len >= SEG_MAX:
+            cut = self.track.best_cut(self._commit_upto + SEG_MIN,
+                                      total - SAMPLE_RATE // 4)
+        if cut is None or cut <= self._commit_upto:
+            return
+        self._commit_queue.append((self.utterance_id, self._commit_upto, cut))
+        self._commit_upto = cut
+        self.cv.notify()
 
     def _maybe_speculate(self, now: float) -> None:
         """Kick off a full-utterance decode midway through the silence pause.
@@ -274,7 +303,7 @@ class Engine:
 
         if due_partial or due_tail:
             with self.cv:
-                if self.buffered_samples >= PARTIAL_MIN_SAMPLES:
+                if len(self.audio) - self._committed_end >= PARTIAL_MIN_SAMPLES:
                     self._last_partial_time = now
                     self._tail_partial_at = None
                     self.pending_partial = True
@@ -306,8 +335,7 @@ class Engine:
         self._configure(msg)
         with self.cv:
             self.utterance_id = int(msg.get("utteranceId", self.utterance_id + 1))
-            self.buffer.clear()
-            self.buffered_samples = 0
+            self._reset_utterance()
             self.pending_partial = False
             self.pending_final = False
             self.pending_spec = False
@@ -316,14 +344,13 @@ class Engine:
             self._last_partial_time = time.perf_counter() * 1000.0
             self._last_voice_ms = float("-inf")
             self._tail_partial_at = None
-            self._last_tokens = []
             self.recording = True
         protocol.send({"type": "state", "state": "listening",
                        "utteranceId": self.utterance_id})
 
     def _stop_recording(self, auto: bool) -> None:
         with self.cv:
-            if not self.recording and self.buffered_samples == 0:
+            if not self.recording and len(self.audio) == 0:
                 return
             self.recording = False
             self.pending_final = True
@@ -342,9 +369,7 @@ class Engine:
             self.pending_final = False
             self.pending_spec = False
             self._spec = None
-            self.buffer.clear()
-            self.buffered_samples = 0
-            self.vad.reset()
+            self._reset_utterance()
             self._tail_partial_at = None
             self._last_voice_ms = float("-inf")
         protocol.send({"type": "state", "state": "cancelled",
@@ -377,9 +402,7 @@ class Engine:
             self.pending_final = False
             self.pending_spec = False
             self._spec = None
-            self.buffer.clear()
-            self.buffered_samples = 0
-            self.vad.reset()
+            self._reset_utterance()
 
         # Already loaded once this session -> switch instantly, no reload screen.
         cached = self.asr_cache.get(key)
@@ -421,6 +444,16 @@ class Engine:
         self.asr = new_asr
         threading.Thread(target=self._load_model, name="loader", daemon=True).start()
 
+    def _reset_utterance(self) -> None:
+        """Drop all audio/segment state (caller holds the lock)."""
+        self.audio.clear()
+        self.track.clear()
+        self.vad.reset()
+        self._committed = []
+        self._committed_end = 0
+        self._commit_upto = 0
+        self._commit_queue = []
+
     def _do_shutdown(self) -> None:
         with self.cv:
             self.shutdown = True
@@ -428,146 +461,166 @@ class Engine:
 
     # -- inference worker ---------------------------------------------------
 
-    def _snapshot(self, clear: bool, cap_seconds: float | None) -> tuple[np.ndarray, int, float]:
-        """Return (audio, utterance_id, window_offset_seconds).
+    def _decode(self, audio: np.ndarray) -> tuple[str, float]:
+        text, ms = self.asr.transcribe(audio)
+        return text, ms
 
-        `window_offset` is how much audio was truncated from the front when
-        capping (0.0 for finals and short partials) - it anchors token times.
+    def _decode_range(self, uid: int, start: int, end: int) -> tuple[list[str], float]:
+        """Decode [start, end) of the current utterance segment by segment.
+
+        Pure-silence segments are skipped (models invent filler words on
+        silence). Returns ([] , 0) if the utterance changed meanwhile.
         """
         with self.lock:
-            if self.buffered_samples == 0:
-                if clear:
-                    self.buffer.clear()
-                    self.buffered_samples = 0
-                    self.vad.reset()
-                return np.zeros(0, dtype=np.float32), self.utterance_id, 0.0
-            audio = np.concatenate(self.buffer) if len(self.buffer) > 1 else self.buffer[0]
-            uid = self.utterance_id
-            if clear:
-                self.buffer.clear()
-                self.buffered_samples = 0
-                self.vad.reset()
-            else:
-                # keep a single concatenated chunk to avoid unbounded list growth
-                self.buffer = [audio]
-        offset = 0.0
-        if cap_seconds is not None:
-            cap = int(cap_seconds * SAMPLE_RATE)
-            if audio.size > cap:
-                offset = (audio.size - cap) / SAMPLE_RATE
-                audio = audio[-cap:]
-        return audio, uid, offset
+            if uid != self.utterance_id:
+                return [], 0.0
+            plan = plan_segments(self.track, start, end)
+            pieces = [(self.audio.slice(a, b), self.track.has_speech(a, b))
+                      for a, b in plan]
+        texts: list[str] = []
+        total_ms = 0.0
+        for audio, speech in pieces:
+            if not speech or audio.size == 0:
+                continue
+            text, ms = self._decode(audio)
+            texts.append(text)
+            total_ms += ms
+        return texts, total_ms
+
+    def _run_commit(self, job: tuple[int, int, int]) -> None:
+        uid, start, end = job
+        texts, _ = self._decode_range(uid, start, end)
+        with self.lock:
+            if uid == self.utterance_id and start == self._committed_end:
+                self._committed.extend(texts)
+                self._committed_end = end
+
+    def _drain_commits(self, uid: int) -> None:
+        """Decode every queued segment of `uid` (in order) before the final."""
+        while True:
+            with self.lock:
+                # Stale jobs of older utterances are dropped; a newer
+                # utterance's jobs stay queued for the main loop.
+                while self._commit_queue and self._commit_queue[0][0] < uid:
+                    self._commit_queue.pop(0)
+                job = (self._commit_queue.pop(0)
+                       if self._commit_queue and self._commit_queue[0][0] == uid else None)
+            if job is None:
+                return
+            self._run_commit(job)
 
     def _inference_loop(self) -> None:
         while True:
             with self.cv:
-                while not (self.pending_final or self.pending_partial or self.pending_spec) \
-                        and not self.shutdown:
+                while not (self.pending_final or self.pending_partial or self.pending_spec
+                           or self._commit_queue) and not self.shutdown:
                     self.cv.wait()
                 if self.shutdown:
                     return
                 do_final = self.pending_final
                 auto = self.final_auto
-                # The final always wins: skip co-scheduled partial/speculation
-                # work so stop latency is at most one decode, never a queue.
-                do_spec = self.pending_spec and not do_final
+                commit_job = None
                 if do_final:
+                    # The final always wins over partial/speculation work.
                     self.pending_final = False
                     self.pending_partial = False
                     self.pending_spec = False
-                elif do_spec:
-                    self.pending_spec = False
+                    do_spec = False
+                elif self._commit_queue:
+                    commit_job = self._commit_queue.pop(0)
+                    do_spec = False
                 else:
-                    self.pending_partial = False
+                    do_spec = self.pending_spec
+                    if do_spec:
+                        self.pending_spec = False
+                    else:
+                        self.pending_partial = False
+                uid = self.utterance_id
 
             try:
-                if do_spec:
-                    self._run_speculative()
-                    continue
-
-                audio, uid, offset_s = self._snapshot(
-                    clear=do_final,
-                    cap_seconds=None if do_final else PARTIAL_MAX_SECONDS + PARTIAL_GUARD_S,
-                )
-                if audio.size == 0:
-                    if do_final:
-                        self._spec = None
-                        protocol.send({"type": "final", "text": "", "utteranceId": uid,
-                                       "auto": auto, "empty": True})
-                    continue
-
-                if do_final:
-                    # Reuse a finished speculation when no speech resumed since
-                    # it was decoded: the final text is already ready.
-                    spec = self._spec
-                    self._spec = None
-                    if spec is not None:
-                        text, ms = spec["text"], spec["ms"]
-                    else:
-                        text, ms = self.asr.transcribe(audio)
-                    rtf = (ms / 1000.0) / (audio.size / SAMPLE_RATE) if audio.size else None
-                    protocol.send({"type": "final", "text": text, "utteranceId": uid,
-                                   "auto": auto, "inferenceMs": round(ms, 1),
-                                   "rtf": round(rtf, 3) if rtf else None,
-                                   "speculative": spec is not None})
-                    self._last_tokens = []
-                    continue
-
-                text, ms = self._partial_transcribe(audio, offset_s)
-                self._last_partial_ms = ms
-                if ms > HEAT_GUARD_MS:
-                    # This machine cannot keep up with live partials - stop
-                    # burning CPU on them; finals still run normally.
-                    self._partials_disabled = True
-                    protocol.log(
-                        "warn",
-                        f"partial inference too slow ({ms:.0f} ms) - live "
-                        "partials disabled for this session (finals unaffected)")
-                protocol.send({"type": "partial", "text": text, "utteranceId": uid,
-                               "inferenceMs": round(ms, 1)})
+                if commit_job is not None:
+                    self._run_commit(commit_job)
+                elif do_final:
+                    self._run_final(uid, auto)
+                elif do_spec:
+                    self._run_speculative(uid)
+                else:
+                    self._run_partial(uid)
             except Exception as exc:  # noqa: BLE001
                 protocol.send({"type": "error", "fatal": False,
                                "message": f"inference error: {exc}"})
 
-    def _run_speculative(self) -> None:
-        """Decode the full buffer during the silence pause (speculative final)."""
-        audio, uid, _ = self._snapshot(clear=False, cap_seconds=None)
+    def _run_final(self, uid: int, auto: bool) -> None:
+        self._drain_commits(uid)
+        with self.lock:
+            total = len(self.audio)
+            start = self._committed_end
+            committed = list(self._committed)
+            spec = self._spec
+            self._spec = None
+        if total == 0:
+            protocol.send({"type": "final", "text": "", "utteranceId": uid,
+                           "auto": auto, "empty": True})
+            return
+        # Reuse a finished speculation when nothing changed since it was made.
+        if spec is not None and spec["uid"] == uid and spec["start"] == start:
+            tail, ms = spec["texts"], spec["ms"]
+        else:
+            tail, ms = self._decode_range(uid, start, total)
+        text = join_texts(committed + tail)
+        rtf = (ms / 1000.0) / ((total - start) / SAMPLE_RATE) if total > start else None
+        protocol.send({"type": "final", "text": text, "utteranceId": uid,
+                       "auto": auto, "inferenceMs": round(ms, 1),
+                       "rtf": round(rtf, 3) if rtf else None,
+                       "speculative": spec is not None})
+        with self.lock:
+            if uid == self.utterance_id and not self.recording:
+                self._reset_utterance()
+
+    def _run_partial(self, uid: int) -> None:
+        with self.lock:
+            if uid != self.utterance_id:
+                return
+            start, total = self._committed_end, len(self.audio)
+            committed = list(self._committed)
+            # Background commits lagging behind (slow machine): preview only the
+            # newest part instead of decoding an overlong window.
+            if total - start > SEG_MAX:
+                start = self.track.best_cut(total - SEG_MAX, total - SEG_MIN)
+                committed = committed + ["…"]
+            audio = self.audio.slice(start, total)
         if audio.size == 0:
             return
-        text, ms = self.asr.transcribe(audio)
-        self._spec = {"text": text, "ms": ms}
-        # Surface the speculative result as a live partial so the preview is
-        # already final-quality while the silence window runs out. If the
-        # utterance ended mid-decode, stay quiet - the final path reports it.
-        if self.recording:
-            protocol.send({"type": "partial", "text": text, "utteranceId": uid,
-                           "inferenceMs": round(ms, 1)})
+        tail, ms = self._decode(audio)
+        self._last_partial_ms = ms
+        if ms > HEAT_GUARD_MS:
+            # This machine cannot keep up with live partials - stop burning
+            # CPU on them; finals still run normally.
+            self._partials_disabled = True
+            protocol.log(
+                "warn",
+                f"partial inference too slow ({ms:.0f} ms) - live "
+                "partials disabled for this session (finals unaffected)")
+        protocol.send({"type": "partial", "text": join_texts(committed + [tail]),
+                       "utteranceId": uid, "inferenceMs": round(ms, 1)})
 
-    def _partial_transcribe(self, audio: np.ndarray, offset_s: float) -> tuple[str, float]:
-        """Decode the partial window, stitching text before the window.
-
-        When the utterance outgrows the partial window, only its tail is
-        re-decoded; the window starts PARTIAL_GUARD_S before the text seam so
-        boundary words get full context. Tokens left of the seam stay frozen
-        from the previous partial (TDT timestamps), tokens right of it come
-        from this decode - the live text keeps growing without jumps or
-        duplicated words.
-        """
-        if not hasattr(self.asr, "transcribe_tokens"):
-            return self.asr.transcribe(audio)
-
-        pieces, ms = self.asr.transcribe_tokens(audio)
-        abs_tokens = [(t, s + offset_s, e + offset_s) for t, s, e in pieces]
-        seam = offset_s + PARTIAL_SEAM_S
-        committed = [x for x in self._last_tokens if x[2] <= seam]
-        straddlers = [x for x in self._last_tokens if x[1] < seam < x[2]]
-        visible = [x for x in abs_tokens if x[1] >= seam]
-        self._last_tokens = committed + straddlers + visible
-
-        joined = ("".join(x[0] for x in committed)
-                  + "".join(x[0] for x in straddlers)
-                  + "".join(x[0] for x in visible))
-        return " ".join(joined.split()), ms
+    def _run_speculative(self, uid: int) -> None:
+        """Decode the open segment during the silence pause (auto-stop)."""
+        with self.lock:
+            start, total = self._committed_end, len(self.audio)
+            committed = list(self._committed)
+        if total <= start:
+            return
+        texts, ms = self._decode_range(uid, start, total)
+        with self.lock:
+            if uid != self.utterance_id or self._committed_end != start:
+                return
+            self._spec = {"uid": uid, "start": start, "texts": texts, "ms": ms}
+            recording = self.recording
+        # Surface it as a live partial: the preview is already final quality.
+        if recording:
+            protocol.send({"type": "partial", "text": join_texts(committed + texts),
+                           "utteranceId": uid, "inferenceMs": round(ms, 1)})
 
 
 def main() -> None:
