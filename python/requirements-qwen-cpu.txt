@@ -1,0 +1,8 @@
+# Whisper Free - optional Qwen3-ASR backend WITHOUT an NVIDIA GPU.
+#
+# Used on macOS (Apple Silicon runs it on the GPU via Metal/MPS) and on
+# Windows/Linux machines without an NVIDIA card (CPU, slower). NVIDIA machines
+# get requirements-qwen.txt (CUDA build of torch) instead.
+
+torch>=2.6
+qwen-asr>=0.0.1

@@ -1,0 +1,64 @@
+{
+  "name": "whisper-free",
+  "productName": "Whisper Free",
+  "version": "1.0.0",
+  "description": "Free, open-source, 100% local alternative to Wispr Flow. Hotkey dictation into any app, powered by NVIDIA Parakeet / Qwen3-ASR - no cloud, no account, no subscription.",
+  "author": "Whisper Free contributors",
+  "license": "MIT",
+  "main": "./out/main/index.js",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "dev:watch": "electron-vite dev --watch",
+    "build": "npm run typecheck && electron-vite build",
+    "build:fast": "electron-vite build",
+    "start:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start.ps1 -Dev",
+    "build:win": "npm run build && electron-builder --win",
+    "build:dir": "npm run build && electron-builder --win --dir",
+    "build:mac": "npm run build && electron-builder --mac",
+    "preview": "electron-vite preview",
+    "start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start.ps1",
+    "start:mac": "electron-vite build && electron .",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "setup:python": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-python.ps1",
+    "make-icon": "node scripts/make-icon.js",
+    "shortcut": "node scripts/make-icon.js && cscript //nologo scripts/create-shortcut.vbs",
+    "lint": "eslint . --ext .ts,.tsx",
+    "rebuild": "electron-builder install-app-deps",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "electron-log": "^5.2.4",
+    "electron-store": "^8.2.0"
+  },
+  "optionalDependencies": {
+    "uiohook-napi": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@typescript-eslint/eslint-plugin": "^7.16.0",
+    "@typescript-eslint/parser": "^7.16.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.19",
+    "electron": "^31.3.0",
+    "electron-builder": "^24.13.3",
+    "electron-vite": "^2.3.0",
+    "eslint": "^8.57.0",
+    "eslint-plugin-react": "^7.34.3",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "postcss": "^8.4.39",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwindcss": "^3.4.6",
+    "typescript": "^5.5.3",
+    "vite": "^5.3.3",
+    "zustand": "^4.5.4"
+  }
+}

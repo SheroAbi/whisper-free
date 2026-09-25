@@ -1,0 +1,35 @@
+{
+  "_comment": "Reference of the settings stored in %APPDATA%/Whisper Free/settings.json. Edit in-app (Settings panel) rather than by hand. Accelerators use Electron syntax (CommandOrControl, Alt, Shift, Super + key).",
+
+  "hotkey": { "accelerator": "CommandOrControl+Shift+Space", "label": "Ctrl + Shift + Space" },
+  "hotkeyMode": "toggle",
+  "toggleWidgetHotkey": { "accelerator": "CommandOrControl+Shift+W", "label": "Ctrl + Shift + W" },
+  "pauseHotkey": { "accelerator": "CommandOrControl+Shift+P", "label": "Ctrl + Shift + P" },
+  "commandPaletteHotkey": { "accelerator": "CommandOrControl+Shift+K", "label": "Ctrl + Shift + K" },
+
+  "autoInsertAfterStop": true,
+  "insertMode": "insert",
+  "appendNewline": false,
+  "pasteAsPlainText": true,
+  "injectionStrategy": "auto",
+  "restoreClipboard": true,
+
+  "micDeviceId": null,
+  "autoStopOnSilence": true,
+  "silenceTimeoutMs": 900,
+  "vadThreshold": 0.012,
+  "partialIntervalMs": 250,
+  "echoCancellation": true,
+  "noiseSuppression": true,
+
+  "modelId": "nemo-parakeet-tdt-0.6b-v3",
+  "quantization": "fp32",
+  "language": "auto",
+
+  "launchAtStartup": false,
+  "warmEngineAtLogin": true,
+  "startMinimized": false,
+  "showWidgetOnMinimize": true,
+  "alwaysShowWidget": false,
+  "closeToTray": true
+}

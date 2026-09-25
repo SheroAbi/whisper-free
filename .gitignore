@@ -1,0 +1,30 @@
+node_modules/
+out/
+dist/
+release/
+*.log
+logs/
+.DS_Store
+.env
+.env.local
+
+# Python sidecar runtime
+python/.venv/
+python/__pycache__/
+**/__pycache__/
+*.pyc
+
+# Downloaded model cache (kept out of VCS)
+models/
+.cache/
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+# UI screenshot harness output
+.ui-shots/
+
+# Local test / benchmark audio (may contain your voice)
+*.wav
+.selftest-tts.wav

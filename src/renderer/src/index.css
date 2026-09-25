@@ -1,0 +1,246 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #0b0d12;
+  color: #e8ecf4;
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* Transparent body for the floating widget surface */
+.widget-body {
+  background: transparent !important;
+}
+
+/* =========================================================================
+   WIDGET · THIN SNAKE GLOW BORDER
+   - A single, ultra-thin snake of light races around the border in ONE
+     direction (clockwise): a short bright head + soft tail + faint wake, then
+     a long transparent gap — never a long band, never a hard stroke.
+   - Spun with a real transform (GPU, never freezes), masked to a hairline band.
+   - Monochromatic per phase: one hue in a few luminance stages.
+   - Idle: a soft green-white ring + halo so the dark widget stays findable.
+   - Recording: red · Paused: amber/gold · Transcribing: teal/cyan
+   ========================================================================= */
+
+/* One direction only: the snake sweeps clockwise, once per --aurora-speed.
+   We SPIN the gradient layer with a real transform (GPU-accelerated, never
+   freezes) instead of animating a custom angle — the latter can lock up on a
+   will-change:transform layer in Chromium and leave the snake stuck. */
+@keyframes snake-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* A compact, quick glow pulse — the thin halo swells slightly while the snake
+   itself never blinks out. Blur is held constant so the line stays hairline. */
+@keyframes snake-breathe {
+  0%,
+  100% {
+    filter:
+      blur(var(--snake-blur, 0.5px))
+      drop-shadow(0 0 2px var(--ring-glow, transparent))
+      drop-shadow(0 0 5px var(--ring-glow, transparent))
+      drop-shadow(0 0 9px var(--ring-glow, transparent))
+      drop-shadow(0 0 14px var(--ring-glow, transparent));
+  }
+  50% {
+    filter:
+      blur(var(--snake-blur, 0.5px))
+      drop-shadow(0 0 3px var(--ring-glow, transparent))
+      drop-shadow(0 0 8px var(--ring-glow, transparent))
+      drop-shadow(0 0 14px var(--ring-glow, transparent))
+      drop-shadow(0 0 21px var(--ring-glow, transparent));
+  }
+}
+
+/* Breathing core glow for the recording dot / mic button. */
+@keyframes core-breathe {
+  0%,
+  100% {
+    opacity: 0.85;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.06);
+  }
+}
+
+/* ── The snake ring ────────────────────────────────────────────────────
+   Masked to a hairline band hugging the rounded rectangle. Opacity is driven
+   only here (with a transition) so phases fade in/out smoothly; the breathe
+   animation touches only the bloom. */
+.aurora-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: var(--ring-w, 1.5px); /* hairline band → ultra-thin snake */
+  pointer-events: none;
+  z-index: 30;
+  opacity: var(--aurora-opacity, 0);
+  animation: snake-breathe var(--pulse-speed, 2.4s) ease-in-out infinite;
+  transition: opacity 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* mask → ring: visible area = border-box MINUS content-box */
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+/* The conic snake fills the ring; the mask shows only the thin band. */
+.aurora-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+}
+
+.aurora-layer::before {
+  content: '';
+  position: absolute;
+  /* A big square centered on the pill: its side ≫ the pill's diagonal, so
+     rotating it never reveals an edge, and its center == the pill center, so
+     the conic gradient spins evenly around the border. */
+  top: 50%;
+  left: 50%;
+  width: 640px;
+  height: 640px;
+  margin: -320px 0 0 -320px;
+  background: var(--aurora-grad, transparent);
+  animation: snake-spin var(--aurora-speed, 2.8s) linear infinite;
+  will-change: transform;
+}
+
+
+/* Frameless window drag regions (registered as utilities so @apply works). */
+@layer utilities {
+  .drag {
+    -webkit-app-region: drag;
+  }
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+}
+
+/* Custom scrollbars */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #2a3344;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #38445c;
+  background-clip: content-box;
+}
+
+.text-selectable {
+  user-select: text;
+  cursor: text;
+}
+
+/* Indeterminate sweep for the startup loading bar */
+@keyframes splash-sweep {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(310%);
+  }
+}
+.splash-bar-track {
+  position: relative;
+  overflow: hidden;
+}
+.splash-bar-indeterminate {
+  animation: splash-sweep 1.25s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@layer components {
+  /* Airbnb-style quiet surface: near-flat panel, hairline ring, soft ambient
+     depth — content floats on the canvas instead of being boxed in. */
+  .card {
+    @apply rounded-2xl bg-white/[0.03] ring-1 ring-white/[0.05];
+  }
+  .btn {
+    @apply no-drag inline-flex items-center justify-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium
+      transition-all duration-150 outline-none;
+  }
+  .btn-ghost {
+    @apply btn text-ink-muted hover:text-ink hover:bg-white/[0.06];
+  }
+  .btn-primary {
+    @apply btn text-white shadow-glow;
+    background: linear-gradient(135deg, #ff6b81 0%, #ff385c 50%, #e61e4d 100%);
+  }
+  .btn-primary:hover {
+    filter: brightness(1.07);
+  }
+  .btn-subtle {
+    @apply btn bg-white/[0.05] text-ink ring-1 ring-inset ring-white/[0.06] hover:bg-white/[0.09];
+  }
+  .nav-item {
+    @apply no-drag flex w-full cursor-pointer items-center gap-3 rounded-xl px-3 py-2.5 text-[13.5px]
+      font-medium text-ink-muted transition-all duration-150 hover:bg-white/[0.05] hover:text-ink;
+  }
+  .nav-item-active {
+    @apply bg-white/[0.07] text-ink;
+  }
+  .field-label {
+    @apply mb-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint;
+  }
+  .input {
+    @apply no-drag w-full rounded-xl bg-white/[0.04] px-3 py-2 text-sm text-ink
+      ring-1 ring-inset ring-white/[0.07] outline-none transition
+      focus:ring-2 focus:ring-brand/50;
+  }
+  /* Custom range slider (accent thumb, hairline track). */
+  .range {
+    @apply no-drag h-1.5 w-40 cursor-pointer appearance-none rounded-full bg-white/[0.1] outline-none;
+  }
+  .range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    height: 14px;
+    width: 14px;
+    border-radius: 9999px;
+    background: #ff385c;
+    box-shadow: 0 0 0 3px rgba(255, 56, 92, 0.18);
+    transition: transform 0.12s ease;
+  }
+  .range::-webkit-slider-thumb:hover {
+    transform: scale(1.12);
+  }
+  .range::-moz-range-thumb {
+    height: 14px;
+    width: 14px;
+    border: none;
+    border-radius: 9999px;
+    background: #ff385c;
+  }
+}

@@ -1,0 +1,61 @@
+appId: app.whisperfree.desktop
+productName: Whisper Free
+copyright: Copyright © 2026 Whisper Free contributors
+
+directories:
+  buildResources: build
+  output: release/${version}
+
+# Bundle the Python sidecar sources and the Win32 injection helper next to the
+# packaged app. The Python runtime/venv is created on first launch into userData
+# (see src/main/engine/pythonResolver.ts), and the speech models are downloaded
+# once into the model folder (see python/model_store.py) - the installer stays
+# small while everything runs fully local.
+extraResources:
+  - from: python
+    to: python
+    filter:
+      - '**/*'
+      - '!.venv/**'
+      - '!__pycache__/**'
+  - from: src/main/injection/win32-input.ps1
+    to: win32-input.ps1
+
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.map'
+
+asarUnpack:
+  - resources/**
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-Setup.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Whisper Free
+  deleteAppDataOnUninstall: false
+
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  extendInfo:
+    NSMicrophoneUsageDescription: Whisper Free listens to your microphone only while you dictate. Audio never leaves your Mac.
+
+# Avoid trying to compile native deps; uiohook-napi ships prebuilds.
+npmRebuild: false

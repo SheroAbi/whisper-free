@@ -1,0 +1,14 @@
+# Whisper Free - optional GPU backend for the Qwen3-ASR 0.6B model.
+#
+# Installed on demand the first time the Qwen model is selected (the app shells
+# out to `pip install -r requirements-qwen.txt`). Pulls a CUDA build of PyTorch
+# plus the qwen-asr package (transformers backend). Validated on an RTX 2080 Ti
+# (Turing, fp16 + SDPA attention) with CUDA 12.4 wheels.
+#
+# torch is pinned to the cu124 build via the extra index + local version tag so
+# pip cannot silently fall back to the CPU-only PyPI wheel.
+
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+torch==2.6.0+cu124
+qwen-asr>=0.0.1

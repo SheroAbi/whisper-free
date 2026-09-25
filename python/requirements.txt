@@ -1,0 +1,15 @@
+# Whisper Free - local inference sidecar dependencies.
+#
+# onnx-asr runs NVIDIA Parakeet TDT (incl. the TDT decoder) entirely in ONNX
+# Runtime, downloading the ONNX model from Hugging Face on first use.
+#
+# CPU (default, works everywhere):
+#   pip install -r requirements.txt
+# GPU: on NVIDIA machines EngineManager swaps the CPU build for the GPU build
+#   automatically at first start (one-time ~600 MB, `onnxruntime-gpu[cuda,cudnn]`,
+#   CUDA 13 + cuDNN 9 wheels). fp32 is the recommended precision on GPU.
+#
+# IMPORTANT: use CPython 3.9 - 3.13 (newer runtimes may lack onnxruntime wheels).
+
+onnx-asr[cpu,hub]>=0.6.0
+numpy>=1.24,<3
