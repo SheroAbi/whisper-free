@@ -63,6 +63,13 @@ export class HotkeyManager extends EventEmitter {
   /** keycodes currently held down — filters out key auto-repeat. */
   private heldKeys = new Set<number>()
 
+  /**
+   * Push-to-talk bindings that fired onDown and still wait for their onUp.
+   * Released by the key-up of their main key, whatever the modifiers are by
+   * then: people let go of Ctrl/Shift before the key about as often as after.
+   */
+  private activeHolds = new Set<NativeBinding>()
+
   constructor() {
     super()
     if (this.uio) {
@@ -256,16 +263,22 @@ export class HotkeyManager extends EventEmitter {
     this.heldKeys.add(e.keycode)
     if (this.capturing || !firstPress) return
     for (const b of this.uioBindings) {
-      if (this.matchesBinding(b, e)) b.onDown()
+      if (this.matchesBinding(b, e)) {
+        if (b.onUp) this.activeHolds.add(b)
+        b.onDown()
+      }
     }
   }
 
   private onNativeKeyup(e: UiohookEvent): void {
-    // Only a key that had a matching keydown gets a keyup — never fire twice.
-    const wasHeld = this.heldKeys.delete(e.keycode)
-    if (!wasHeld || this.capturing) return
-    for (const b of this.uioBindings) {
-      if (b.onUp && this.matchesBinding(b, e)) b.onUp()
+    this.heldKeys.delete(e.keycode)
+    // Only a binding whose keydown fired gets its keyup, exactly once. Not
+    // matched on the modifiers (see activeHolds), and not suspended while
+    // capturing: a hold that never ends would keep the microphone recording.
+    for (const b of [...this.activeHolds]) {
+      if (b.keycode !== e.keycode) continue
+      this.activeHolds.delete(b)
+      b.onUp?.()
     }
   }
 

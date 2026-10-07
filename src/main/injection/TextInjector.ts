@@ -18,6 +18,17 @@ const COMMAND_TIMEOUT_MS = 5000
 const POLL_INTERVAL_MS = 350
 
 /**
+ * The clipboard text to put back after pasting, or null when there is none
+ * to restore: putting back only the text would replace a copied image or
+ * file list with an empty string.
+ */
+function readRestorableText(): string | null {
+  if (clipboard.availableFormats().some((f) => !f.startsWith('text/'))) return null
+  const text = clipboard.readText()
+  return text === '' ? null : text
+}
+
+/**
  * Windows: owns the persistent PowerShell Win32 helper and exposes a clean, promise
  * based API for: reading the foreground window, restoring focus, and injecting
  * text via the paste→type cascade. All commands are serialized through a FIFO
@@ -156,9 +167,13 @@ export class TextInjector {
         return
       }
       const timer = setTimeout(() => {
-        const idx = this.queue.findIndex((p) => p.timer === timer)
-        if (idx >= 0) this.queue.splice(idx, 1)
+        // The helper answers strictly in order. Dropping the timed-out entry
+        // would hand its late reply to the next command and shift every reply
+        // after it (FG answering PASTE, ...). Keep the entry, so a late reply
+        // is consumed by the request it belongs to, and restart a helper that
+        // has stopped answering; onExit fails whatever is still queued.
         reject(new Error(`helper-timeout: ${cmd.split('|')[0]}`))
+        this.restartUnresponsiveHelper()
       }, COMMAND_TIMEOUT_MS)
       this.queue.push({ resolve, reject, timer, cmd })
       try {
@@ -169,6 +184,17 @@ export class TextInjector {
         reject(err as Error)
       }
     })
+  }
+
+  private restartUnresponsiveHelper(): void {
+    if (!this.proc || !this.ready) return
+    logger.warn('win32 helper stopped answering - restarting it')
+    this.ready = false
+    try {
+      this.proc.kill()
+    } catch {
+      /* onExit still runs */
+    }
   }
 
   // --- foreground tracking ---------------------------------------------------
@@ -263,7 +289,10 @@ export class TextInjector {
     const strategy = settings.injectionStrategy
     const reportTarget = target ?? this.lastExternalTarget
     const willPaste = strategy !== 'type'
-    const saved = willPaste && settings.restoreClipboard ? clipboard.readText() : null
+    const saved = willPaste && settings.restoreClipboard ? readRestorableText() : null
+    // The old clipboard comes back only once the text was delivered; on the
+    // clipboard-only fallback the dictation must stay there for Ctrl+V.
+    let delivered = false
     if (willPaste) this.copyToClipboard(text)
     logger.info('inject (blind paste) strategy', strategy)
 
@@ -296,6 +325,7 @@ export class TextInjector {
         const line = await this.send('PASTE').catch((e) => String(e))
         if (line.startsWith('OK')) {
           if (settings.appendNewline) await this.send('ENTER').catch(() => undefined)
+          delivered = true
           logger.info(`inject ok via paste (${elapsed()} ms)`)
           return { ok: true, method: 'paste', target: reportTarget, elapsedMs: elapsed() }
         }
@@ -307,6 +337,7 @@ export class TextInjector {
       const b64 = Buffer.from(payload, 'utf16le').toString('base64')
       const line = await this.send(`TYPE|${b64}`).catch((e) => String(e))
       if (line.startsWith('OK')) {
+        delivered = true
         logger.info(`inject ok via type (${elapsed()} ms)`)
         return { ok: true, method: 'type', target: reportTarget, elapsedMs: elapsed() }
       }
@@ -322,7 +353,7 @@ export class TextInjector {
         elapsedMs: elapsed()
       }
     } finally {
-      if (saved !== null) {
+      if (saved !== null && delivered) {
         setTimeout(() => {
           try {
             clipboard.writeText(saved)
@@ -346,7 +377,7 @@ export class TextInjector {
     started: number
   ): Promise<InjectionResult> {
     const elapsed = () => Math.round(performance.now() - started)
-    const saved = settings.restoreClipboard ? clipboard.readText() : null
+    const saved = settings.restoreClipboard ? readRestorableText() : null
     this.copyToClipboard(text)
     const lines = ['tell application "System Events"', 'keystroke "v" using command down']
     if (settings.appendNewline) lines.push('key code 36')

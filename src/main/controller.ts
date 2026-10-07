@@ -60,6 +60,12 @@ export class AppController {
   private paused = false
   private micActive = false
   private utteranceId = 0
+  // startRecording awaits the target window before it records. A stop or
+  // cancel that arrives in that window (a quick push-to-talk tap, a double
+  // press) is remembered here instead of being lost, which left the mic on.
+  private starting = false
+  private stopRequested = false
+  private cancelledUtteranceId = 0
 
   private currentTarget: InjectionTarget | null = null
   private lastTarget: InjectionTarget | null = null
@@ -200,12 +206,12 @@ export class AppController {
   }
 
   async toggle(): Promise<void> {
-    if (this.recording) await this.stopRecording('hotkey')
+    if (this.recording || this.starting) await this.stopRecording('hotkey')
     else await this.startRecording('hotkey')
   }
 
   async startRecording(_source: StopReason | 'ptt' | 'hotkey' | 'ui'): Promise<void> {
-    if (this.recording || this.busy()) return
+    if (this.recording || this.starting || this.busy()) return
     if (!this.engine.isReady()) {
       const msg =
         this.engine.state === 'error'
@@ -217,7 +223,19 @@ export class AppController {
     }
 
     // Capture the window that should receive the text BEFORE we steal focus.
-    this.currentTarget = await this.injector.resolveTarget().catch(() => null)
+    this.starting = true
+    this.stopRequested = false
+    try {
+      this.currentTarget = await this.injector.resolveTarget().catch(() => null)
+    } finally {
+      this.starting = false
+    }
+    if (this.stopRequested) {
+      // Released or cancelled before recording began: nothing was said.
+      this.stopRequested = false
+      logger.info('record start dropped: stopped while resolving the target')
+      return
+    }
     logger.info('record start; target=', this.currentTarget?.title ?? '(none)')
 
     this.recording = true
@@ -232,7 +250,10 @@ export class AppController {
   }
 
   async stopRecording(reason: StopReason): Promise<void> {
-    if (!this.recording) return
+    if (!this.recording) {
+      if (this.starting) this.stopRequested = true
+      return
+    }
     this.recording = false
     this.paused = false
     this.recordStopTs = Date.now()
@@ -243,9 +264,13 @@ export class AppController {
   }
 
   cancelRecording(): void {
+    if (this.starting) this.stopRequested = true
     if (!this.recording && this.status === 'idle') return
     this.recording = false
     this.paused = false
+    // A final already being decoded still arrives after the cancel; onFinal
+    // drops it instead of pasting text the user threw away.
+    this.cancelledUtteranceId = this.utteranceId
     this.engine.cancelUtterance()
     this.tray?.setRecording(false)
     this.setStatus('idle', 'cancelled')
@@ -300,6 +325,13 @@ export class AppController {
     rtf: number | null
     empty: boolean
   }): Promise<void> {
+    // Only the current, not cancelled utterance may set the status or paste:
+    // a late final of an older one would otherwise mark a running recording
+    // idle, or insert text after the user cancelled it.
+    if (f.utteranceId !== this.utteranceId || f.utteranceId === this.cancelledUtteranceId) {
+      logger.debug('ignoring final of utterance', f.utteranceId)
+      return
+    }
     // Silence endpoint while still recording: mirror a manual stop.
     if (f.auto && this.recording) {
       this.recording = false
