@@ -20,12 +20,26 @@ const POLL_INTERVAL_MS = 350
 /**
  * The clipboard text to put back after pasting, or null when there is none
  * to restore: putting back only the text would replace a copied image or
- * file list with an empty string.
+ * file list (text/uri-list is the native file format) with plain text.
  */
-function readRestorableText(): string | null {
-  if (clipboard.availableFormats().some((f) => !f.startsWith('text/'))) return null
-  const text = clipboard.readText()
+async function readRestorableText(): Promise<string | null> {
+  // Raw OS formats ("electron application/osclipboard;...") ride along with
+  // ordinary text copies (a browser adds its source URL), so only images and
+  // files decide that the clipboard must not be touched.
+  const items = await clipboard.read()
+  const holdsNonText = items.some((item) =>
+    item.types.some((t) => t.startsWith('image/') || t === 'text/uri-list')
+  )
+  if (holdsNonText) return null
+  const text = await clipboard.readText()
   return text === '' ? null : text
+}
+
+/** Puts the user's clipboard back once the paste has been consumed. */
+function restoreClipboardLater(text: string): void {
+  setTimeout(() => {
+    clipboard.writeText(text).catch(() => undefined)
+  }, 400)
 }
 
 /**
@@ -248,8 +262,9 @@ export class TextInjector {
     return this.ready
   }
 
-  copyToClipboard(text: string): void {
-    clipboard.writeText(text)
+  /** Never rejects: inject() promises not to throw. */
+  copyToClipboard(text: string): Promise<void> {
+    return clipboard.writeText(text).catch((err) => logger.warn('clipboard write failed', String(err)))
   }
 
   /**
@@ -276,7 +291,7 @@ export class TextInjector {
 
     const okReady = await this.whenReady()
     if (!okReady) {
-      this.copyToClipboard(text)
+      await this.copyToClipboard(text)
       return {
         ok: false,
         method: 'clipboard-only',
@@ -289,11 +304,12 @@ export class TextInjector {
     const strategy = settings.injectionStrategy
     const reportTarget = target ?? this.lastExternalTarget
     const willPaste = strategy !== 'type'
-    const saved = willPaste && settings.restoreClipboard ? readRestorableText() : null
+    const saved =
+      willPaste && settings.restoreClipboard ? await readRestorableText().catch(() => null) : null
     // The old clipboard comes back only once the text was delivered; on the
     // clipboard-only fallback the dictation must stay there for Ctrl+V.
     let delivered = false
-    if (willPaste) this.copyToClipboard(text)
+    if (willPaste) await this.copyToClipboard(text)
     logger.info('inject (blind paste) strategy', strategy)
 
     try {
@@ -343,7 +359,7 @@ export class TextInjector {
       }
 
       // 3) Last resort: leave it on the clipboard for a manual Ctrl+V.
-      this.copyToClipboard(text)
+      await this.copyToClipboard(text)
       logger.warn('inject failed - clipboard fallback', line)
       return {
         ok: false,
@@ -353,15 +369,7 @@ export class TextInjector {
         elapsedMs: elapsed()
       }
     } finally {
-      if (saved !== null && delivered) {
-        setTimeout(() => {
-          try {
-            clipboard.writeText(saved)
-          } catch {
-            /* ignore */
-          }
-        }, 400)
-      }
+      if (saved !== null && delivered) restoreClipboardLater(saved)
     }
   }
 
@@ -377,8 +385,8 @@ export class TextInjector {
     started: number
   ): Promise<InjectionResult> {
     const elapsed = () => Math.round(performance.now() - started)
-    const saved = settings.restoreClipboard ? readRestorableText() : null
-    this.copyToClipboard(text)
+    const saved = settings.restoreClipboard ? await readRestorableText().catch(() => null) : null
+    await this.copyToClipboard(text)
     const lines = ['tell application "System Events"', 'keystroke "v" using command down']
     if (settings.appendNewline) lines.push('key code 36')
     lines.push('end tell')
@@ -392,15 +400,7 @@ export class TextInjector {
       logger.warn('mac paste failed - clipboard fallback', err)
       return { ok: false, method: 'clipboard-only', target, error: err, elapsedMs: elapsed() }
     }
-    if (saved !== null) {
-      setTimeout(() => {
-        try {
-          clipboard.writeText(saved)
-        } catch {
-          /* ignore */
-        }
-      }, 400)
-    }
+    if (saved !== null) restoreClipboardLater(saved)
     logger.info(`inject ok via paste (${elapsed()} ms)`)
     return { ok: true, method: 'paste', target, elapsedMs: elapsed() }
   }

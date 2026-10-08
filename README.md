@@ -36,7 +36,7 @@ Every hotkey can be changed in **Settings**, including push-to-talk mode.
 
 ## 🪟 Windows (main platform)
 
-**You need:** Windows 10/11 (64-bit), [Node.js](https://nodejs.org) 18+, [Python](https://www.python.org/downloads/) **3.10 – 3.12** (64-bit).
+**You need:** Windows 10/11 (64-bit), [Node.js](https://nodejs.org) 22.12+, [Python](https://www.python.org/downloads/) **3.10 – 3.12** (64-bit).
 An NVIDIA GPU is optional but makes it much faster.
 
 ```bash
@@ -63,7 +63,7 @@ Good to know:
 > code paths are implemented (Python setup, paste via Cmd+V, permissions) but
 > haven't had much real-world testing yet. Bug reports are very welcome!
 
-**You need:** macOS 12+, [Homebrew](https://brew.sh), then:
+**You need:** macOS 13+, [Homebrew](https://brew.sh), then:
 
 ```bash
 brew install node python@3.12

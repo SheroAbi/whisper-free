@@ -531,7 +531,9 @@ export class EngineManager extends EventEmitter {
     const proc = this.proc
     proc.stderr?.setEncoding('utf8')
     proc.stderr?.on('data', (d: string) => {
-      const text = d.trim()
+      // onnxruntime writes its warnings as UTF-16 with colour codes on Windows;
+      // without the NULs and escape sequences Diagnostics shows readable text.
+      const text = d.replace(/\x00/g, '').replace(/\x1b\[[0-9;]*m/g, '').trim()
       if (text) logger.warn('engine stderr', text)
     })
     proc.on('exit', (code) => this.onExit(code))

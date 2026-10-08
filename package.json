@@ -8,7 +8,7 @@
   "main": "./out/main/index.js",
   "private": true,
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12"
   },
   "scripts": {
     "dev": "electron-vite dev",
@@ -30,7 +30,7 @@
     "shortcut": "node scripts/make-icon.js && cscript //nologo scripts/create-shortcut.vbs",
     "lint": "eslint . --ext .ts,.tsx",
     "rebuild": "electron-builder install-app-deps",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "install-electron && electron-builder install-app-deps"
   },
   "dependencies": {
     "electron-log": "^5.2.4",
@@ -47,7 +47,7 @@
     "@typescript-eslint/parser": "^7.16.0",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.19",
-    "electron": "^31.3.0",
+    "electron": "^44.7.0",
     "electron-builder": "^24.13.3",
     "electron-vite": "^2.3.0",
     "eslint": "^8.57.0",

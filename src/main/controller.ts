@@ -367,7 +367,7 @@ export class AppController {
     const s = settings.get()
 
     if (s.insertMode === 'copy') {
-      clipboard.writeText(s.appendNewline ? text + '\n' : text)
+      await this.injector.copyToClipboard(s.appendNewline ? text + '\n' : text)
       this.recordHistory(text, false, 'copy', null)
       this.setStatus('idle', 'Copied to clipboard')
       this.finishMetrics()
@@ -375,7 +375,7 @@ export class AppController {
     }
 
     if (!s.autoInsertAfterStop) {
-      clipboard.writeText(text)
+      await this.injector.copyToClipboard(text)
       this.recordHistory(text, false, 'manual', null)
       this.setStatus('idle', 'Ready to paste')
       this.finishMetrics()
@@ -437,9 +437,14 @@ export class AppController {
     return result
   }
 
-  copyText(text: string): boolean {
-    clipboard.writeText(text)
-    return true
+  async copyText(text: string): Promise<boolean> {
+    try {
+      await clipboard.writeText(text)
+      return true
+    } catch (err) {
+      logger.warn('copy to clipboard failed', String(err))
+      return false
+    }
   }
 
   // -- status broadcast ----------------------------------------------------
